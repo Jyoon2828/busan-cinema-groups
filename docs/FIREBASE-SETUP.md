@@ -67,3 +67,7 @@ firebase emulators:exec --only database --project demo-cinema-classroom "python3
 ## 이 버전의 규칙 업데이트
 
 개인 의견 경로와 최종 두 항목 형식이 바뀌었습니다. 기존 연결 설정은 그대로 쓰고, ZIP 안의 database.rules.json 전체를 다시 게시한 뒤 새 수업을 만듭니다. 이전 수업 코드를 이어 사용하지 않습니다.
+
+## 개인 의견 게시 오류 수정본
+
+이미 cinemaClassV3 수업을 사용 중이라면 이번 빈 번호 처리 수정에는 Firebase 설정이나 규칙 변경이 필요 없습니다. 웹앱 파일을 교체하고 새로고침합니다. 기존 수업 코드와 기록을 그대로 사용할 수 있습니다.

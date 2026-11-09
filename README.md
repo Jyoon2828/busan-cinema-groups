@@ -2,13 +2,20 @@
 
 학생은 공통 링크 하나에서 모둠·번호·이름을 입력해 들어옵니다. 교사가 영화관을 지정하면 해당 모둠의 모든 학생 화면이 바뀝니다. 각자 질문 하나를 골라 개인 의견을 게시한 뒤, 모둠에서 생각을 모아 기록이 한 명이 소개와 의미를 제출합니다. 전자칠판에서는 사진과 두 항목을 한 화면에 띄워 발표합니다.
 
-## 이번 버전으로 바꿀 때
+## 개인 의견 게시 오류 수정본을 적용할 때
 
-1. ZIP의 압축을 푼 내용물 전체를 기존 모둠용 GitHub 저장소에 덮어 올립니다. `index.html`이 저장소 최상위에 있어야 합니다. `assets`, `vendor`, `lesson.js`를 포함합니다.
-2. `app-config.js`에는 전달한 `busan-cinema-groups` 프로젝트의 연결 설정이 이미 들어 있습니다.
-3. Firebase 콘솔의 **Realtime Database → 규칙**에서 이 ZIP의 **database.rules.json 전체**로 바꾸고 **게시**합니다. 개인 의견 게시판과 간단해진 제출 형식에 새 규칙이 필요합니다.
-4. Vercel 배포가 완료되면 새로고침하고 **새 수업**을 만듭니다. 이전 버전의 수업 코드를 이어 쓰지 않습니다.
-5. Authentication의 Google·익명 로그인과 Vercel 승인 도메인은 기존 설정을 유지합니다. 실제 학생 기기로 입장·게시·제출·발표를 한 번 시험합니다.
+이전에 제공한 3단계 활동 버전을 이미 사용 중이라면, 압축을 푼 파일 전체를 GitHub에 덮어 올립니다. 실제 실행 파일 변경은 `index.html`, `app.js`, `model.js`, `firebase-client.js`, `lesson.js` 다섯 개입니다. Vercel 배포 후 교사·학생 화면을 새로고침하고, 다시 의견을 게시합니다. PC에서는 Ctrl+F5를 사용할 수 있습니다.
+
+이번 오류 수정은 같은 `cinemaClassV3` 형식을 유지합니다. Firebase 연결 설정과 규칙은 그대로 사용하며, 수업을 새로 만들거나 기록을 삭제할 필요가 없습니다. 작성 중인 기기 메모도 유지합니다. 오류가 나기 전 이미 서버에 저장된 개인 의견은 다시 들어오면 게시판에 표시됩니다.
+
+원인은 학생 번호로 된 목록이 빈 칸을 포함한 배열로 돌아올 때, 빈 칸을 게시글로 처리한 것이었습니다. Firebase 값을 읽는 단계에서 번호별 목록으로 정리하고, 학생 게시판·교사 참여 현황·전자칠판 게시판·참여 학생 목록에서도 빈 칸을 건너뛰도록 수정했습니다. 이 처리는 기기 안에서 수행하며 서버 읽기·쓰기 횟수는 늘리지 않습니다.
+
+## 이전 버전에서 처음 업데이트할 때
+
+1. ZIP을 푼 내용물 전체를 GitHub 저장소에 올립니다. `index.html`이 최상위에 있어야 합니다. `assets`, `vendor`, `lesson.js`를 포함합니다.
+2. `app-config.js`에는 전달한 `busan-cinema-groups` 연결 설정이 들어 있습니다.
+3. 기존 앱이 `cinemaGroupsV1` 또는 `cinemaClassV2`라면 Firebase Realtime Database 규칙을 제공한 `database.rules.json` 전체로 게시하고 새 수업을 만듭니다. 이미 `cinemaClassV3`라면 이 단계는 필요 없습니다.
+4. Authentication Google·익명 로그인과 Vercel 승인 도메인은 유지합니다.
 
 새 데이터는 `cinemaClassV3` 아래에 저장합니다. 이전 `cinemaGroupsV1`, `cinemaClassV2`의 규칙과 데이터는 보존합니다. 다른 종류 앱도 같은 프로젝트를 사용한다면 해당 앱의 규칙을 별도로 보존해야 합니다.
 
@@ -69,3 +76,9 @@ ZIP 자체가 아니라 압축을 푼 내용물을 올립니다. Vercel Framewor
 2026-11-09: 공식 Realtime Database Emulator에서 81개 권한·등록·개인 의견·원자적 제출·기록이·배정 변경·만료·삭제 검사를 통과했습니다. 브라우저 연습 모드에서 학생 입장, 개인 의견 게시, 기록이의 두 항목 제출, 교사 수신과 전자칠판 한 화면 발표를 확인했습니다. 1024×600 화면에서 자료·토의·발표의 배치를 점검했습니다. 실제 프로젝트의 Google 로그인과 서로 다른 기기 간 연동은 배포 후 확인해야 합니다.
 
 사진과 자료의 자세한 출처는 `SOURCES.md`, 설정·수업·사용량 안내는 `docs` 폴더에 있습니다.
+
+### 게시 오류 재발 검사
+
+2026-11-09: 공식 Realtime Database Emulator와 JavaScript SDK로 번호 1·3의 빈 칸 배열, 학생 삭제, 번호 40, 빈 목록 등 15개 회귀 검사를 통과했습니다. 빈 칸이 있는 데이터를 전달하는 브라우저 검증에서도 개인 의견 게시, 모둠 최종 제출, 교사 참여 수와 게시글 읽기를 확인했습니다.
+
+회귀 검사 파일: `tests/firebase_numbered_records_test.mjs`. 실행 환경에 `@firebase/rules-unit-testing`, `firebase`, `firebase-tools`가 필요합니다. 테스트는 로컬 에뮬레이터의 `demo-cinema-classroom3` 프로젝트만 사용합니다. 외부 설치 경로를 사용할 때는 `CINEMA_TEST_REQUIRE_FROM`에 해당 환경의 `package.json` 절대 경로를 전달합니다.

@@ -1,5 +1,5 @@
 /* Firebase traffic is limited to explicit submissions and small classroom signals. */
-import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS, normalizeProfile, validateOpinion } from './model.js';
+import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS, normalizeProfile, validateOpinion, normalizeRealtimeValue } from './model.js';
 const NS='cinemaClassV3', SDK='https://www.gstatic.com/firebasejs/12.19.0/';
 let sdk, configured=false, configuration, connecting;
 const instances={}, busy={teacher:0,student:0}, active={teacher:0,student:0}, idleTimers={}, caches=new Map();
@@ -34,7 +34,7 @@ export async function ensureStudent(){const i=instance('student');if(i.auth.curr
 function requireTeacher(){const u=teacherUser();if(!u)fail('auth/teacher-required','교사 Google 로그인이 필요해요.');return u;}
 function idle(role){clearTimeout(idleTimers[role]);idleTimers[role]=setTimeout(()=>{if(!busy[role]&&!active[role]&&instances[role]?.db)sdk.goOffline(instances[role].db);},300);}
 async function operation(role,work){const i=instance(role);busy[role]++;clearTimeout(idleTimers[role]);sdk.goOnline(i.db);try{return await work(i.db);}finally{busy[role]--;idle(role);}}
-const read=(role,p)=>operation(role,async db=>(await sdk.get(sdk.ref(db,p))).val());
+const read=(role,p)=>operation(role,async db=>normalizeRealtimeValue((await sdk.get(sdk.ref(db,p))).val()));
 const write=(role,p,value)=>operation(role,db=>sdk.set(sdk.ref(db,p),value));
 const update=(role,values)=>operation(role,db=>sdk.update(sdk.ref(db),values));
 function randomCode(){const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789',a=crypto.getRandomValues(new Uint8Array(8));return [...a].map(v=>chars[v%chars.length]).join('');}
@@ -77,7 +77,7 @@ function watch(role,locations,combine,onData,onError){
  const i=instance(role);let stopped=false,offs=[],values={},seen=new Set();
  const stopListeners=()=>{if(!offs.length)return;for(const off of offs)off();active[role]-=offs.length;offs=[];idle(role);};
  const start=()=>{if(stopped||offs.length||document.hidden)return;sdk.goOnline(i.db);clearTimeout(idleTimers[role]);
-  offs=locations.map(([key,p])=>{active[role]++;return sdk.onValue(sdk.ref(i.db,p),snapshot=>{values[key]=snapshot.val();seen.add(key);if(seen.size===locations.length)onData(clone(combine(values)));},error=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();onError?.(error);});});
+  offs=locations.map(([key,p])=>{active[role]++;return sdk.onValue(sdk.ref(i.db,p),snapshot=>{values[key]=normalizeRealtimeValue(snapshot.val());seen.add(key);if(seen.size===locations.length)onData(clone(combine(values)));},error=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();onError?.(error);});});
  };
  const visibility=()=>{if(document.hidden)stopListeners();else start();};document.addEventListener('visibilitychange',visibility);start();
  return ()=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();};

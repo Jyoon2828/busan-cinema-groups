@@ -24,3 +24,11 @@ export function freshOpinion(cinemaId=''){return {cinemaId:CINEMA_IDS.includes(c
 export function sanitizeOpinion(input={}){return {cinemaId:CINEMA_IDS.includes(input.cinemaId)?input.cinemaId:'',questionId:DISCUSSION_QUESTIONS.some(q=>q.id===input.questionId)?input.questionId:'',text:clean(input.text,OPINION_LIMIT)};}
 export function validateOpinion(input){const opinion=sanitizeOpinion(input),errors=[];if(!opinion.cinemaId)errors.push('선생님이 지정한 영화관을 확인해 주세요.');if(!opinion.questionId)errors.push('세 질문 중 하나를 골라 주세요.');if(!opinion.text.trim())errors.push('고른 질문에 대한 내 생각을 써 주세요.');return {ok:!errors.length,errors,opinion};}
 export function defaultsRoomGroups(assignments={}){return Object.fromEntries(GROUP_IDS.map((id,i)=>[id,{id,name:`${i+1}모둠`,cinemaId:CINEMA_IDS.includes(assignments[id])?assignments[id]:''}]));}
+
+// Realtime Database may return numbered children as arrays with null gaps.
+// Keep the original student-number keys; never compact or renumber them.
+export function normalizeRealtimeValue(value){
+ if(value===null||typeof value!=='object')return value;
+ return Object.fromEntries(Object.entries(value).filter(([,child])=>child!==null&&child!==undefined).map(([key,child])=>[key,normalizeRealtimeValue(child)]));
+}
+export function recordValues(value){return Object.values(value&&typeof value==='object'?value:{}).filter(record=>record!==null&&typeof record==='object'&&!Array.isArray(record));}
