@@ -1,6 +1,6 @@
 /* Firebase traffic is limited to explicit submissions and small classroom signals. */
-import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS, normalizeProfile, LESSON_SLIDES } from './model.js';
-const NS='cinemaClassV2', SDK='https://www.gstatic.com/firebasejs/12.19.0/';
+import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS, normalizeProfile, validateOpinion } from './model.js';
+const NS='cinemaClassV3', SDK='https://www.gstatic.com/firebasejs/12.19.0/';
 let sdk, configured=false, configuration, connecting;
 const instances={}, busy={teacher:0,student:0}, active={teacher:0,student:0}, idleTimers={}, caches=new Map();
 const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));
@@ -16,7 +16,7 @@ export async function connect(config=globalThis.CINEMA_FIREBASE_CONFIG){
  connecting=(async()=>{
   const [app,auth,database]=await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-database.js')]);sdk={...app,...auth,...database};configuration={...config};
   for(const role of ['teacher','student']){
-   const appName='busan-cinema-classroom-v2-'+role;
+   const appName='busan-cinema-classroom-v3-'+role;
    const application=sdk.getApps().find(a=>a.name===appName)||sdk.initializeApp(configuration,appName);
    const authentication=sdk.getAuth(application);await sdk.setPersistence(authentication,sdk.browserLocalPersistence);await authentication.authStateReady();
    instances[role]={app:application,auth:authentication,db:null};
@@ -42,7 +42,7 @@ function token(){const a=crypto.getRandomValues(new Uint8Array(32));let s='';for
 export async function createRoom({title='우리 지역 영화관 탐험',assignments={}}={}){
  const user=requireTeacher(),id=randomCode(),createdAt=Date.now(),expiresAt=createdAt+ROOM_TTL_MS;
  const groups=defaultsRoomGroups(assignments);
- const room={title:String(title).trim().slice(0,60)||'우리 지역 영화관 탐험',open:true,phase:'research',slide:0,reveal:0,presentingGroup:'',presentTab:'feature',presentPage:0,timerEndsAt:0,createdAt,expiresAt};
+ const room={title:String(title).trim().slice(0,60)||'우리 지역 영화관 탐험',open:true,phase:'research',slide:0,reveal:0,presentingGroup:'',timerEndsAt:0,createdAt,expiresAt};
  await write('teacher',path('meta',id),{ownerUid:user.uid,createdAt,expiresAt});
  try{await update('teacher',{[path('public',id)]:room,[path('groups',id)]:groups});}catch(e){await write('teacher',path('meta',id),null).catch(()=>{});throw e;}
  return {roomId:id,meta:room,groups};
@@ -82,31 +82,43 @@ function watch(role,locations,combine,onData,onError){
  const visibility=()=>{if(document.hidden)stopListeners();else start();};document.addEventListener('visibilitychange',visibility);start();
  return ()=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();};
 }
-export function watchTeacher(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries','members','writers'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{},members:v.members||{},writers:v.writers||{}}),onData,onError);}
-export function watchBoard(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{}}),onData,onError);}
+export function watchTeacher(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries','members','writers','opinionHeads'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{},members:v.members||{},writers:v.writers||{},opinionHeads:v.opinionHeads||{}}),onData,onError);}
+export function watchBoard(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries','opinionHeads'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{},opinionHeads:v.opinionHeads||{}}),onData,onError);}
 export function watchStudent(id,gId,onData,onError){id=roomId(id);gId=groupId(gId);return watch('student',[
- ['room',path('public',id)],['group',path('groups',id,gId)],['writer',path('writers',id,gId)],['summary',path('summaries',id,gId)]
+ ['room',path('public',id)],['group',path('groups',id,gId)],['writer',path('writers',id,gId)],['summary',path('summaries',id,gId)],['opinions',path('opinions',id,gId)]
  ],v=>v,onData,onError);}
 async function getSubmissionFor(role,id,gId,revision){const key='submission:'+role+':'+id+':'+gId,old=caches.get(key);if(old&&revision!=null&&old.revision===revision)return clone(old);const value=await read(role,path('submissions',id,gId));caches.set(key,clone(value));return value;}
 export async function getSubmission(id,gId,revision,role='teacher'){id=roomId(id);gId=groupId(gId);return getSubmissionFor(role,id,gId,revision);}
 export async function submit(id,gId,payload,expectedRevision=0){
  id=roomId(id);gId=groupId(gId);const user=await ensureStudent(),checked=validateSubmission(payload);if(!checked.ok)fail('submission/invalid',checked.errors[0]);
  const number=await read('student',path('registrations',id,user.uid)),profile=await read('student',path('members',id,number));
+ const ownOpinion=await read('student',path('opinions',id,gId,number));if(!ownOpinion||ownOpinion.cinemaId!==checked.draft.cinemaId)fail('opinion/required','먼저 질문 하나를 골라 내 의견을 게시해 주세요.');
  const previous=await getSubmissionFor('student',id,gId);
  if((previous?.revision||0)!==expectedRevision)fail('submission/conflict','모둠의 제출 내용이 바뀌었어요. 제출된 정리를 불러온 뒤 수정해 주세요. 이 기기의 메모는 보관돼요.');
  const d=checked.draft,revision=expectedRevision+1,submittedAt=Date.now();
- const record={cinemaId:d.cinemaId,feature:d.feature,help:d.help,evidenceIds:d.evidenceIds,meaning:d.meaning,revision,submittedAt,submittedBy:user.uid,submittedName:profile.name,submittedNumber:profile.number};
+ const record={cinemaId:d.cinemaId,introduction:d.introduction.trim(),meaning:d.meaning.trim(),revision,submittedAt,submittedBy:user.uid,submittedName:profile.name,submittedNumber:profile.number};
  const preview=v=>String(v).replace(/\s+/g,' ').trim();
- const summary={groupId:gId,groupName:`${Number(gId.slice(1))}모둠`,cinemaId:d.cinemaId,revision,submittedAt,submittedName:profile.name,submittedNumber:profile.number,featurePreview:preview(d.feature).slice(0,90),meaningPreview:preview(d.meaning.final).slice(0,120)};
+ const summary={groupId:gId,groupName:`${Number(gId.slice(1))}모둠`,cinemaId:d.cinemaId,revision,submittedAt,submittedName:profile.name,submittedNumber:profile.number,introductionPreview:preview(d.introduction).slice(0,90),meaningPreview:preview(d.meaning).slice(0,100)};
  await update('student',{[path('submissions',id,gId)]:record,[path('summaries',id,gId)]:summary});caches.set('submission:student:'+id+':'+gId,clone(record));return record;
 }
 export async function setRoomOpen(id,open){id=roomId(id);requireTeacher();await write('teacher',path('public',id,'open'),!!open);}
-export async function setBoard(id,changes){id=roomId(id);requireTeacher();const allowed=['slide','reveal','presentingGroup','presentTab','presentPage','timerEndsAt','phase'];const updates={};for(const key of allowed)if(Object.hasOwn(changes,key))updates[path('public',id,key)]=changes[key];await update('teacher',updates);}
-export async function setPresentation(id,gId){if(gId!=='')groupId(gId);await setBoard(id,{slide:11,presentingGroup:gId,presentTab:'feature',presentPage:0,phase:'present',reveal:0});}
+export async function setBoard(id,changes){id=roomId(id);requireTeacher();const allowed=['slide','reveal','presentingGroup','timerEndsAt','phase'];const updates={};for(const key of allowed)if(Object.hasOwn(changes,key))updates[path('public',id,key)]=changes[key];await update('teacher',updates);}
+export async function setPresentation(id,gId){if(gId!=='')groupId(gId);await setBoard(id,{slide:11,presentingGroup:gId,phase:'present',reveal:0});}
 export async function resetWriter(id,gId){id=roomId(id);groupId(gId);requireTeacher();await write('teacher',path('writers',id,gId),null);}
-export async function resetStudent(id,number){id=roomId(id);requireTeacher();const profile=await read('teacher',path('members',id,String(number)));if(!profile)return;const changes={[path('members',id,String(number))]:null,[path('registrations',id,profile.uid)]:null};const w=await read('teacher',path('writers',id,profile.groupId));if(w?.uid===profile.uid)changes[path('writers',id,profile.groupId)]=null;await update('teacher',changes);}
-export async function deleteRoom(id){id=roomId(id);requireTeacher();await update('teacher',Object.fromEntries(['public','groups','members','registrations','writers','submissions','summaries','meta'].map(part=>[path(part,id),null])));for(const key of caches.keys())if(key.includes(id))caches.delete(key);}
+export async function resetStudent(id,number){id=roomId(id);requireTeacher();const profile=await read('teacher',path('members',id,String(number)));if(!profile)return;const changes={[path('members',id,String(number))]:null,[path('registrations',id,profile.uid)]:null,[path('opinions',id,profile.groupId,String(number))]:null,[path('opinionHeads',id,profile.groupId,String(number))]:null};const w=await read('teacher',path('writers',id,profile.groupId));if(w?.uid===profile.uid)changes[path('writers',id,profile.groupId)]=null;await update('teacher',changes);}
+export async function deleteRoom(id){id=roomId(id);requireTeacher();await update('teacher',Object.fromEntries(['public','groups','members','registrations','writers','opinions','opinionHeads','submissions','summaries','meta'].map(part=>[path(part,id),null])));for(const key of caches.keys())if(key.includes(id))caches.delete(key);}
 
 export async function assignCinema(id,gId,cinemaId){id=roomId(id);groupId(gId);requireTeacher();if(cinemaId!==''&&!CINEMA_IDS.includes(cinemaId))fail('assignment/invalid','영화관을 확인해 주세요.');await write('teacher',path('groups',id,gId,'cinemaId'),cinemaId);}
 
 export async function getRoster(id){id=roomId(id);requireTeacher();const [members,writers]=await Promise.all([read('teacher',path('members',id)),read('teacher',path('writers',id))]);return {members:members||{},writers:writers||{}};}
+
+export async function getOpinions(id,gId,role='teacher'){id=roomId(id);groupId(gId);return await read(role,path('opinions',id,gId))||{};}
+export async function postOpinion(id,gId,input){
+ id=roomId(id);groupId(gId);const user=await ensureStudent(),check=validateOpinion(input);if(!check.ok)fail('opinion/invalid',check.errors[0]);
+ const number=await read('student',path('registrations',id,user.uid)),profile=await read('student',path('members',id,number));
+ const old=await read('student',path('opinions',id,gId,number));
+ const revision=(old?.revision||0)+1,postedAt=Date.now(),d=check.opinion;
+ const record={...d,text:d.text.trim(),uid:user.uid,number:profile.number,name:profile.name,revision,postedAt};
+ const head={cinemaId:d.cinemaId,questionId:d.questionId,revision,postedAt};
+ await update('student',{[path('opinions',id,gId,number)]:record,[path('opinionHeads',id,gId,number)]:head});return record;
+}
