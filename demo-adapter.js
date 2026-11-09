@@ -1,10 +1,10 @@
-import { CINEMA_IDS, GROUP_IDS, ROOM_TTL_MS, defaultsRoomGroups, validateSubmission } from './model.js';
+import { CINEMA_IDS, GROUP_IDS, ROOM_TTL_MS, defaultsRoomGroups, validateSubmission, normalizeProfile } from './model.js';
 
 export const isDemo = true;
-const DB_KEY = 'cinema-groups-demo-v1';
-const TEACHER_UID_KEY = 'cinema-groups-demo-teacher-uid';
-const TEACHER_AUTH_KEY = 'cinema-groups-demo-teacher-auth';
-const STUDENT_UID_KEY = 'cinema-groups-demo-student-uid';
+const DB_KEY = 'cinema-class-v2-demo-v1';
+const TEACHER_UID_KEY = 'cinema-class-v2-demo-teacher-uid';
+const TEACHER_AUTH_KEY = 'cinema-class-v2-demo-teacher-auth';
+const STUDENT_UID_KEY = 'cinema-class-v2-demo-student-uid';
 const callbacks = new Set();
 const cache = new Map();
 let memoryDB = { rooms: {} };
@@ -12,7 +12,7 @@ let memoryTeacherUid = '', memoryStudentUid = '', activeTeacher = null;
 let channel;
 try {
   if (typeof BroadcastChannel !== 'undefined') {
-    channel = new BroadcastChannel('cinema-groups-demo-changes');
+    channel = new BroadcastChannel('cinema-class-v2-demo-changes');
     channel.onmessage = () => emit();
     channel.unref?.();
   }
@@ -69,7 +69,7 @@ function requireTeacher(room) {
 function requireGroup(room, groupId, allowTeacher = false) {
   if (!GROUP_IDS.includes(groupId) || !room.groups[groupId]) fail('모둠을 찾지 못했어요.', 'group-not-found');
   if (allowTeacher && teacherUser()?.uid === room.ownerUid) return room.groups[groupId];
-  if (room.claims?.[groupId]?.uid !== uid('student')) fail('모둠 입장 링크로 먼저 들어와 주세요.', 'permission-denied');
+  if (room.members?.[room.registrations?.[uid('student')]]?.groupId !== groupId) fail('먼저 모둠 · 번호 · 이름으로 입장해 주세요.', 'permission-denied');
   return room.groups[groupId];
 }
 const publicGroup = group => ({ id: group.id, name: group.name, cinemaId: group.cinemaId });
@@ -107,120 +107,44 @@ export async function teacherLogout() {
   storageSet('localStorage', TEACHER_AUTH_KEY, '0');
 }
 export async function ensureStudent() { return { uid: uid('student') }; }
-export async function createRoom({ title = '', assignments } = {}) {
-  const teacher = teacherUser();
-  if (!teacher) fail('선생님으로 먼저 들어와 주세요.', 'auth-required');
-  const data = db();
-  let roomId;
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  do {
-    const bytes = new Uint8Array(8); globalThis.crypto.getRandomValues(bytes);
-    roomId = [...bytes].map(value => alphabet[value % alphabet.length]).join('');
-  } while (data.rooms[roomId]);
-  const now = Date.now();
-  const meta = { title: String(title || '우리 지역 영화관 탐험').slice(0, 60), open: true, phase: 'research', presentingGroup: '', createdAt: now, expiresAt: now + ROOM_TTL_MS };
-  const groups = defaultsRoomGroups(assignments);
-  for (const group of Object.values(groups)) group.joinToken = random(32);
-  data.rooms[roomId] = { ownerUid: teacher.uid, meta, groups, claims: {}, submissions: {}, summaries: {} };
-  commit(data);
-  return { roomId, meta: clone(meta), groups: clone(groups) };
+export async function createRoom({title='우리 지역 영화관 탐험',assignments={}}={}){
+ const teacher=teacherUser();if(!teacher)fail('교사로 로그인해 주세요.','auth-required');
+ const data=db(),alphabet='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let roomId;
+ do{roomId=[...crypto.getRandomValues(new Uint8Array(8))].map(n=>alphabet[n%32]).join('');}while(data.rooms[roomId]);
+ const now=Date.now(),meta={title:String(title).slice(0,60),open:true,phase:'research',slide:0,reveal:0,presentingGroup:'',presentTab:'feature',presentPage:0,timerEndsAt:0,createdAt:now,expiresAt:now+ROOM_TTL_MS},groups=defaultsRoomGroups(assignments);
+ data.rooms[roomId]={ownerUid:teacher.uid,meta,groups,members:{},registrations:{},writers:{},submissions:{},summaries:{}};commit(data);return {roomId,meta:clone(meta),groups:clone(groups)};
 }
-export async function getRoom(roomId) { return clone(getLiveRoom(db(), roomId).room.meta); }
-export async function getTeacherRoom(roomId) {
-  const { room } = getLiveRoom(db(), roomId); requireTeacher(room);
-  return { meta: clone(room.meta), groups: clone(room.groups) };
+export async function getRoom(id){return clone(getLiveRoom(db(),id).room.meta);}
+export async function getTeacherRoom(id){const {room}=getLiveRoom(db(),id);requireTeacher(room);return {meta:clone(room.meta),groups:clone(room.groups)};}
+export async function updateAssignments(id,assignments){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);for(const g of GROUP_IDS){if(assignments[g]!==''&&!CINEMA_IDS.includes(assignments[g]))fail('영화관을 확인해 주세요.','invalid');room.groups[g].cinemaId=assignments[g];}commit(data);}
+export async function joinStudent(id,input){
+ const wanted=normalizeProfile(input),data=db(),{room}=getLiveRoom(data,id),student=await ensureStudent();
+ const oldNumber=room.registrations[student.uid];let profile;
+ if(oldNumber){profile=room.members[oldNumber];if(['number','groupId','name'].some(k=>profile[k]!==wanted[k]))fail('이 기기에 다른 입장 정보가 남아 있어요. 선생님께 입장 초기화를 부탁하세요.','entry/already');}
+ else{if(!room.meta.open)fail('입장이 닫혀 있어요.','room/closed');if(room.members[wanted.number])fail('이미 사용 중인 번호예요. 번호를 확인해 주세요.','entry/occupied');profile={...wanted,uid:student.uid,joinedAt:Date.now()};room.members[wanted.number]=profile;room.registrations[student.uid]=wanted.number;commit(data);}
+ return clone({room:room.meta,profile,group:room.groups[wanted.groupId],writer:room.writers[wanted.groupId]||null,summary:room.summaries[wanted.groupId]||null,submission:room.submissions[wanted.groupId]||null});
 }
-export async function updateAssignments(roomId, assignments) {
-  const data = db(), { room } = getLiveRoom(data, roomId); requireTeacher(room);
-  for (const groupId of GROUP_IDS) {
-    const cinemaId = assignments?.[groupId];
-    if (cinemaId !== '' && !CINEMA_IDS.includes(cinemaId)) fail('배정할 영화관을 확인해 주세요.', 'invalid-assignment');
-  }
-  for (const groupId of GROUP_IDS) room.groups[groupId].cinemaId = assignments[groupId];
-  commit(data);
+export async function claimWriter(id,g){const data=db(),{room}=getLiveRoom(data,id);requireGroup(room,g);const user=uid('student'),profile=room.members[room.registrations[user]];if(!room.meta.open)fail('제출이 닫혀 있어요.','room/closed');if(room.writers[g]&&room.writers[g].uid!==user)fail('이미 기록이가 있어요.','writer/occupied');room.writers[g]={uid:user,number:profile.number,name:profile.name};commit(data);return clone(room.writers[g]);}
+const teacherState=id=>{const {room}=getLiveRoom(db(),id);requireTeacher(room);return {room:room.meta,groups:room.groups,summaries:room.summaries,members:room.members,writers:room.writers};};
+export function watchTeacher(id,onData,onError){return watch(()=>teacherState(id),onData,onError);}
+export function watchBoard(id,onData,onError){return watch(()=>{const {room,groups,summaries}=teacherState(id);return {room,groups,summaries};},onData,onError);}
+export function watchStudent(id,g,onData,onError){return watch(()=>{const {room}=getLiveRoom(db(),id);requireGroup(room,g);return {room:room.meta,group:room.groups[g],writer:room.writers[g]||null,summary:room.summaries[g]||null};},onData,onError);}
+export async function getSubmission(id,g){const {room}=getLiveRoom(db(),id);requireGroup(room,g,true);return clone(room.submissions[g]||null);}
+export async function submit(id,g,input,expectedRevision=0){
+ const data=db(),{room}=getLiveRoom(data,id);requireGroup(room,g);if(!room.meta.open)fail('제출이 닫혀 있어요.','room/closed');if(room.writers[g]?.uid!==uid('student'))fail('모둠의 기록이가 제출해 주세요.','writer/required');
+ const check=validateSubmission(input);if(!check.ok)fail(check.errors[0],'submission/invalid');if(room.groups[g].cinemaId!==check.draft.cinemaId)fail('선생님이 지정한 영화관을 확인해 주세요.','assignment/changed');
+ if((room.submissions[g]?.revision||0)!==expectedRevision)fail('제출된 모둠 정리를 먼저 불러와 주세요.','submission/conflict');
+ const profile=room.members[room.registrations[uid('student')]],{version,...draft}=check.draft,record={...draft,revision:expectedRevision+1,submittedAt:Date.now(),submittedBy:profile.uid,submittedName:profile.name,submittedNumber:profile.number};
+ room.submissions[g]=record;room.summaries[g]={groupId:g,groupName:room.groups[g].name,cinemaId:draft.cinemaId,revision:record.revision,submittedAt:record.submittedAt,submittedName:profile.name,submittedNumber:profile.number,featurePreview:draft.feature.replace(/\s+/g,' ').slice(0,90),meaningPreview:draft.meaning.final.replace(/\s+/g,' ').slice(0,120)};
+ commit(data);return clone(record);
 }
-export async function joinGroup(roomId, groupId, token) {
-  const data = db(), { room } = getLiveRoom(data, roomId);
-  if (!GROUP_IDS.includes(groupId)) fail('모둠을 찾지 못했어요.', 'group-not-found');
-  const group = room.groups[groupId], student = await ensureStudent();
-  if (group.joinToken !== token) fail('모둠 입장 링크가 바뀌었어요. 선생님께 새 링크를 받아 주세요.', 'invalid-token');
-  const claimed = room.claims?.[groupId];
-  if (claimed && claimed.uid !== student.uid) fail('다른 기기에서 작성 중인 모둠이에요. 대표 기기를 이용하거나 선생님께 입장 초기화를 부탁하세요.', 'group-in-use');
-  if (!claimed) {
-    if (!room.meta.open) fail('지금은 모둠 입장이 닫혀 있어요.', 'room-closed');
-    room.claims ||= {}; room.claims[groupId] = { uid: student.uid, token };
-    commit(data);
-  }
-  return { room: clone(room.meta), group: publicGroup(group), submission: clone(room.submissions?.[groupId] || null) };
-}
-export function watchGroup(roomId, groupId, onValue, onError) {
-  return watch(() => {
-    const { room } = getLiveRoom(db(), roomId), group = requireGroup(room, groupId);
-    return { group: publicGroup(group), roomOpen: room.meta.open, phase: room.meta.phase, presentingGroup: room.meta.presentingGroup || '' };
-  }, onValue, onError);
-}
-export async function submit(roomId, groupId, payload) {
-  const data = db(), { id, room } = getLiveRoom(data, roomId), group = requireGroup(room, groupId);
-  if (!room.meta.open) fail('제출이 닫혀 있어요. 선생님께 확인해 주세요.', 'room-closed');
-  const validation = validateSubmission(payload);
-  if (!validation.ok) fail(validation.errors.join('\n'), 'incomplete-submission');
-  if (group.cinemaId && validation.draft.cinemaId !== group.cinemaId) fail('선생님이 지정한 영화관으로 조사 내용을 정리해 주세요.', 'assignment-mismatch');
-  const revision = (room.submissions?.[groupId]?.revision || 0) + 1, submittedAt = Date.now();
-  const draft = validation.draft;
-  const submission = { cinemaId: draft.cinemaId, feature: draft.feature, help: draft.help, evidenceIds: draft.evidenceIds, meaning: draft.meaning, revision, submittedAt };
-  room.submissions ||= {}; room.summaries ||= {};
-  room.submissions[groupId] = submission;
-  room.summaries[groupId] = { groupId, groupName: group.name, cinemaId: draft.cinemaId, revision, submittedAt, featurePreview: draft.feature.trim().slice(0, 90), meaningPreview: draft.meaning.final.trim().slice(0, 120) };
-  forgetRoomCache(id);
-  commit(data);
-  return { revision, submittedAt };
-}
-export function watchSummaries(roomId, onValue, onError) {
-  return watch(() => { const { room } = getLiveRoom(db(), roomId); requireTeacher(room); return room.summaries || {}; }, onValue, onError);
-}
-export async function getSubmission(roomId, groupId, revision) {
-  const { id, room } = getLiveRoom(db(), roomId); requireGroup(room, groupId, true);
-  const value = room.submissions?.[groupId] || null;
-  if (!value) return null;
-  const key = `${id}:${groupId}:${value.revision}`;
-  if (revision === value.revision && cache.has(key)) return clone(cache.get(key));
-  cache.set(key, clone(value));
-  return clone(value);
-}
-export async function setRoomOpen(roomId, open, phase) {
-  const data = db(), { room } = getLiveRoom(data, roomId); requireTeacher(room);
-  room.meta.open = !!open;
-  if (phase !== undefined) {
-    if (!['research', 'meaning', 'present'].includes(phase)) fail('활동 단계를 확인해 주세요.', 'invalid-phase');
-    room.meta.phase = phase;
-  }
-  commit(data);
-}
-export async function resetGroup(roomId, groupId) {
-  const data = db(), { room } = getLiveRoom(data, roomId); requireTeacher(room);
-  if (!GROUP_IDS.includes(groupId)) fail('모둠을 찾지 못했어요.', 'group-not-found');
-  const token = random(32);
-  room.groups[groupId].joinToken = token;
-  delete room.claims[groupId];
-  commit(data);
-  return token;
-}
-export async function deleteRoom(roomId) {
-  const data = db(), { id, room } = getLiveRoom(data, roomId); requireTeacher(room);
-  delete data.rooms[id]; forgetRoomCache(id); commit(data);
-}
+export async function setRoomOpen(id,open){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);room.meta.open=!!open;commit(data);}
+export async function setBoard(id,changes){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);Object.assign(room.meta,changes);commit(data);}
+export async function setPresentation(id,g){await setBoard(id,{slide:11,presentingGroup:g,presentTab:'feature',presentPage:0,phase:'present',reveal:0});}
+export async function resetWriter(id,g){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);delete room.writers[g];commit(data);}
+export async function resetStudent(id,number){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);const profile=room.members[number];if(!profile)return;delete room.members[number];delete room.registrations[profile.uid];if(room.writers[profile.groupId]?.uid===profile.uid)delete room.writers[profile.groupId];commit(data);}
+export async function deleteRoom(id){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);delete data.rooms[id];commit(data);}
 
-export function watchRoom(roomId, onValue, onError) {
-  return watch(() => clone(getLiveRoom(db(), roomId).room.meta), onValue, onError);
-}
-export async function setPresentation(roomId, groupId = '') {
-  const data = db(), { room } = getLiveRoom(data, roomId); requireTeacher(room);
-  if (groupId !== '' && !GROUP_IDS.includes(groupId)) fail('발표할 모둠을 확인해 주세요.', 'group-not-found');
-  room.meta.presentingGroup = groupId;
-  if (groupId) room.meta.phase = 'present';
-  commit(data);
-}
+export async function assignCinema(id,g,cinemaId){const data=db(),{room}=getLiveRoom(data,id);requireTeacher(room);if(cinemaId!==''&&!CINEMA_IDS.includes(cinemaId))fail('영화관을 확인해 주세요.','invalid');room.groups[g].cinemaId=cinemaId;commit(data);}
 
-export function watchGroups(roomId, onValue, onError) {
-  return watch(() => { const { room } = getLiveRoom(db(), roomId); requireTeacher(room); return room.groups || {}; }, onValue, onError);
-}
+export async function getRoster(id){const value=teacherState(id);return clone({members:value.members,writers:value.writers});}

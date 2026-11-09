@@ -1,6 +1,6 @@
 /* Firebase traffic is limited to explicit submissions and small classroom signals. */
-import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS } from './model.js';
-const NS='cinemaGroupsV1', SDK='https://www.gstatic.com/firebasejs/12.19.0/';
+import { validateSubmission, defaultsRoomGroups, ROOM_TTL_MS, GROUP_IDS, CINEMA_IDS, normalizeProfile, LESSON_SLIDES } from './model.js';
+const NS='cinemaClassV2', SDK='https://www.gstatic.com/firebasejs/12.19.0/';
 let sdk, configured=false, configuration, connecting;
 const instances={}, busy={teacher:0,student:0}, active={teacher:0,student:0}, idleTimers={}, caches=new Map();
 const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));
@@ -16,7 +16,7 @@ export async function connect(config=globalThis.CINEMA_FIREBASE_CONFIG){
  connecting=(async()=>{
   const [app,auth,database]=await Promise.all([import(SDK+'firebase-app.js'),import(SDK+'firebase-auth.js'),import(SDK+'firebase-database.js')]);sdk={...app,...auth,...database};configuration={...config};
   for(const role of ['teacher','student']){
-   const appName='busan-cinema-groups-'+role;
+   const appName='busan-cinema-classroom-v2-'+role;
    const application=sdk.getApps().find(a=>a.name===appName)||sdk.initializeApp(configuration,appName);
    const authentication=sdk.getAuth(application);await sdk.setPersistence(authentication,sdk.browserLocalPersistence);await authentication.authStateReady();
    instances[role]={app:application,auth:authentication,db:null};
@@ -39,51 +39,74 @@ const write=(role,p,value)=>operation(role,db=>sdk.set(sdk.ref(db,p),value));
 const update=(role,values)=>operation(role,db=>sdk.update(sdk.ref(db),values));
 function randomCode(){const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789',a=crypto.getRandomValues(new Uint8Array(8));return [...a].map(v=>chars[v%chars.length]).join('');}
 function token(){const a=crypto.getRandomValues(new Uint8Array(32));let s='';for(const v of a)s+=String.fromCharCode(v);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
-function assignmentsOnly(assignments){const groups=defaultsRoomGroups(assignments);for(const g of Object.values(groups))if(g.cinemaId!==''&&!CINEMA_IDS.includes(g.cinemaId))fail('assignment/invalid','배정할 영화관을 확인해 주세요.');return groups;}
-export async function createRoom({title='부산 영화관 모둠 탐험',assignments}={}){
- const user=requireTeacher(),groups=assignmentsOnly(assignments),createdAt=Date.now(),expiresAt=createdAt+ROOM_TTL_MS;
- const id=randomCode();
+export async function createRoom({title='우리 지역 영화관 탐험',assignments={}}={}){
+ const user=requireTeacher(),id=randomCode(),createdAt=Date.now(),expiresAt=createdAt+ROOM_TTL_MS;
+ const groups=defaultsRoomGroups(assignments);
+ const room={title:String(title).trim().slice(0,60)||'우리 지역 영화관 탐험',open:true,phase:'research',slide:0,reveal:0,presentingGroup:'',presentTab:'feature',presentPage:0,timerEndsAt:0,createdAt,expiresAt};
  await write('teacher',path('meta',id),{ownerUid:user.uid,createdAt,expiresAt});
- const meta={title:String(title).trim().slice(0,80)||'부산 영화관 모둠 탐험',open:true,phase:'research',presentingGroup:'',createdAt,expiresAt};
- for(const g of Object.values(groups))g.joinToken=token();
- try{await update('teacher',{[path('public',id)]:meta,[path('groups',id)]:groups});}catch(e){await update('teacher',{[path('meta',id)]:null}).catch(()=>{});throw e;}
- caches.set('groups:'+id,clone(groups));return {roomId:id,meta:clone(meta),groups:clone(groups)};
+ try{await update('teacher',{[path('public',id)]:room,[path('groups',id)]:groups});}catch(e){await write('teacher',path('meta',id),null).catch(()=>{});throw e;}
+ return {roomId:id,meta:room,groups};
 }
-export async function getRoom(id){id=roomId(id);await ensureStudent();const meta=await read('student',path('public',id));if(!meta)fail('room/missing','수업을 찾지 못했어요. 수업 코드를 확인해 주세요.');return {...meta,roomId:id};}
-export async function getTeacherRoom(id){id=roomId(id);requireTeacher();const [privateMeta,meta,groups]=await Promise.all([read('teacher',path('meta',id)),read('teacher',path('public',id)),read('teacher',path('groups',id))]);if(!privateMeta||!meta)fail('room/missing','이 계정의 수업을 찾지 못했어요.');caches.set('groups:'+id,clone(groups||{}));return {meta:{...meta,roomId:id},groups:groups||{}};}
-export async function updateAssignments(id,assignments){id=roomId(id);requireTeacher();const wanted=assignmentsOnly(assignments),updates={};for(const g of GROUP_IDS)updates[path('groups',id,g,'cinemaId')]=wanted[g].cinemaId;await update('teacher',updates);const groups=caches.get('groups:'+id);if(groups)for(const g of GROUP_IDS)groups[g].cinemaId=wanted[g].cinemaId;}
-export async function joinGroup(id,gId,joinToken){
- id=roomId(id);gId=groupId(gId);if(!/^[A-Za-z0-9_-]{43,128}$/.test(String(joinToken||'')))fail('group/link','선생님이 보내 준 모둠 링크를 열어 주세요.');
- const user=await ensureStudent(),room=await getRoom(id);
- try{await write('student',path('members',id,gId),{uid:user.uid,token:joinToken,joinedAt:Date.now()});}catch(e){const error=new Error('이 모둠은 다른 대표 기기가 사용 중이거나 링크가 바뀌었어요. 선생님께 대표 기기 재설정을 요청해 주세요.');error.code=e.code||'group/claim';throw error;}
- const group=await read('student',path('groups',id,gId));const submission=await getSubmissionFor('student',id,gId);return {room,group:{id:gId,name:group.name,cinemaId:group.cinemaId},submission};
+export async function getRoom(id){id=roomId(id);await ensureStudent();const value=await read('student',path('public',id));if(!value)fail('room/missing','수업을 찾지 못했어요. 수업 코드를 확인해 주세요.');if(value.expiresAt<Date.now())fail('room/expired','수업의 사용 기간이 끝났어요.');return {...value,roomId:id};}
+export async function getTeacherRoom(id){id=roomId(id);requireTeacher();const [meta,room,groups]=await Promise.all([read('teacher',path('meta',id)),read('teacher',path('public',id)),read('teacher',path('groups',id))]);if(!meta||!room)fail('room/missing','수업을 만든 Google 계정과 수업 코드를 확인해 주세요.');return {meta:{...room,roomId:id},groups:groups||{}};}
+export async function updateAssignments(id,assignments){id=roomId(id);requireTeacher();const wanted=defaultsRoomGroups(assignments),changes={};for(const g of GROUP_IDS)changes[path('groups',id,g,'cinemaId')]=wanted[g].cinemaId;await update('teacher',changes);}
+export async function joinStudent(id,input){
+ id=roomId(id);const wanted=normalizeProfile(input),user=await ensureStudent(),room=await getRoom(id);
+ const oldNumber=await read('student',path('registrations',id,user.uid));
+ let profile;
+ if(oldNumber){
+  profile=await read('student',path('members',id,oldNumber));
+  if(!profile||['number','groupId','name'].some(k=>profile[k]!==wanted[k]))fail('entry/already','이 기기에 다른 입장 정보가 남아 있어요. 선생님 화면의 참여 학생에서 입장을 초기화해 주세요.');
+ }else{
+  if(!room.open)fail('room/closed','아직 입장할 수 없어요. 선생님께 제출 열기를 부탁하세요.');
+  profile={...wanted,uid:user.uid,joinedAt:Date.now()};
+  try{await update('student',{[path('members',id,wanted.number)]:profile,[path('registrations',id,user.uid)]:wanted.number});}
+  catch(e){if(/permission/i.test(e.code||''))fail('entry/occupied','이미 사용 중인 번호이거나 수업 입장이 닫혀 있어요. 번호를 확인하고, 필요하면 선생님께 입장 초기화를 부탁하세요.');throw e;}
+ }
+ const [group,writer,summary]=await Promise.all([read('student',path('groups',id,wanted.groupId)),read('student',path('writers',id,wanted.groupId)),read('student',path('summaries',id,wanted.groupId))]);
+ const submission=summary?await getSubmissionFor('student',id,wanted.groupId,summary.revision):null;
+ return {room,profile,group,writer,summary,submission};
+}
+export async function claimWriter(id,gId){
+ id=roomId(id);gId=groupId(gId);const user=await ensureStudent();const number=await read('student',path('registrations',id,user.uid));const profile=await read('student',path('members',id,number));
+ const value={uid:user.uid,number:profile.number,name:profile.name};
+ const result=await operation('student',db=>sdk.runTransaction(sdk.ref(db,path('writers',id,gId)),old=>{if(old&&old.uid!==user.uid)return;return old||value;},{applyLocally:false}));
+ if(!result.committed)fail('writer/occupied','이미 기록이가 있어요. 선생님 화면에서 기록이를 바꿀 수 있어요.');return result.snapshot.val();
 }
 function watch(role,locations,combine,onData,onError){
  const i=instance(role);let stopped=false,offs=[],values={},seen=new Set();
  const stopListeners=()=>{if(!offs.length)return;for(const off of offs)off();active[role]-=offs.length;offs=[];idle(role);};
  const start=()=>{if(stopped||offs.length||document.hidden)return;sdk.goOnline(i.db);clearTimeout(idleTimers[role]);
-  offs=locations.map(([key,p])=>{active[role]++;return sdk.onValue(sdk.ref(i.db,p),snapshot=>{values[key]=snapshot.val();seen.add(key);if(seen.size===locations.length)onData(clone(combine(values)));},error=>{stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();onError?.(error);});});
+  offs=locations.map(([key,p])=>{active[role]++;return sdk.onValue(sdk.ref(i.db,p),snapshot=>{values[key]=snapshot.val();seen.add(key);if(seen.size===locations.length)onData(clone(combine(values)));},error=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();onError?.(error);});});
  };
  const visibility=()=>{if(document.hidden)stopListeners();else start();};document.addEventListener('visibilitychange',visibility);start();
  return ()=>{if(stopped)return;stopped=true;document.removeEventListener('visibilitychange',visibility);stopListeners();};
 }
-export function watchRoom(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',[['room',path('public',id)]],v=>v.room,onData,onError);}
-export function watchGroup(id,gId,onData,onError){id=roomId(id);gId=groupId(gId);return watch('student',[['group',path('groups',id,gId)],['room',path('public',id)]],v=>({group:v.group?{id:gId,name:v.group.name,cinemaId:v.group.cinemaId}:null,roomOpen:!!v.room?.open,phase:v.room?.phase||'research',presentingGroup:v.room?.presentingGroup||''}),onData,onError);}
-export function watchSummaries(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',[['summaries',path('summaries',id)]],v=>v.summaries||{},onData,onError);}
+export function watchTeacher(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries','members','writers'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{},members:v.members||{},writers:v.writers||{}}),onData,onError);}
+export function watchBoard(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',['public','groups','summaries'].map(part=>[part,path(part,id)]),v=>({room:v.public,groups:v.groups||{},summaries:v.summaries||{}}),onData,onError);}
+export function watchStudent(id,gId,onData,onError){id=roomId(id);gId=groupId(gId);return watch('student',[
+ ['room',path('public',id)],['group',path('groups',id,gId)],['writer',path('writers',id,gId)],['summary',path('summaries',id,gId)]
+ ],v=>v,onData,onError);}
 async function getSubmissionFor(role,id,gId,revision){const key='submission:'+role+':'+id+':'+gId,old=caches.get(key);if(old&&revision!=null&&old.revision===revision)return clone(old);const value=await read(role,path('submissions',id,gId));caches.set(key,clone(value));return value;}
-export async function getSubmission(id,gId,revision){id=roomId(id);gId=groupId(gId);return getSubmissionFor(teacherUser()?'teacher':'student',id,gId,revision);}
-export async function submit(id,gId,payload){
- id=roomId(id);gId=groupId(gId);const user=await ensureStudent(),checked=validateSubmission(payload);if(!checked.ok)fail('submission/invalid',checked.errors.join('\n'));
- const key='submission:student:'+id+':'+gId;let previous=caches.get(key);if(previous===undefined)previous=await getSubmissionFor('student',id,gId);
- const revision=(previous?.revision||0)+1,submittedAt=Date.now(),d=checked.draft;
- const record={cinemaId:d.cinemaId,feature:d.feature,help:d.help,evidenceIds:d.evidenceIds,meaning:d.meaning,revision,submittedAt,submittedBy:user.uid};
- const preview=s=>String(s).replace(/\s+/g,' ').trim();
- const summary={groupId:gId,groupName:`${Number(gId.slice(1))}모둠`,cinemaId:d.cinemaId,revision,submittedAt,featurePreview:preview(d.feature).slice(0,90),meaningPreview:preview(d.meaning.final).slice(0,120)};
- await update('student',{[path('submissions',id,gId)]:record,[path('summaries',id,gId)]:summary});caches.set(key,clone(record));return {revision,submittedAt};
+export async function getSubmission(id,gId,revision,role='teacher'){id=roomId(id);gId=groupId(gId);return getSubmissionFor(role,id,gId,revision);}
+export async function submit(id,gId,payload,expectedRevision=0){
+ id=roomId(id);gId=groupId(gId);const user=await ensureStudent(),checked=validateSubmission(payload);if(!checked.ok)fail('submission/invalid',checked.errors[0]);
+ const number=await read('student',path('registrations',id,user.uid)),profile=await read('student',path('members',id,number));
+ const previous=await getSubmissionFor('student',id,gId);
+ if((previous?.revision||0)!==expectedRevision)fail('submission/conflict','모둠의 제출 내용이 바뀌었어요. 제출된 정리를 불러온 뒤 수정해 주세요. 이 기기의 메모는 보관돼요.');
+ const d=checked.draft,revision=expectedRevision+1,submittedAt=Date.now();
+ const record={cinemaId:d.cinemaId,feature:d.feature,help:d.help,evidenceIds:d.evidenceIds,meaning:d.meaning,revision,submittedAt,submittedBy:user.uid,submittedName:profile.name,submittedNumber:profile.number};
+ const preview=v=>String(v).replace(/\s+/g,' ').trim();
+ const summary={groupId:gId,groupName:`${Number(gId.slice(1))}모둠`,cinemaId:d.cinemaId,revision,submittedAt,submittedName:profile.name,submittedNumber:profile.number,featurePreview:preview(d.feature).slice(0,90),meaningPreview:preview(d.meaning.final).slice(0,120)};
+ await update('student',{[path('submissions',id,gId)]:record,[path('summaries',id,gId)]:summary});caches.set('submission:student:'+id+':'+gId,clone(record));return record;
 }
-export async function setRoomOpen(id,open,phase){id=roomId(id);requireTeacher();const updates={[path('public',id,'open')]:!!open};if(phase!=null){if(!['research','meaning','present'].includes(phase))fail('phase/invalid','활동 단계를 확인해 주세요.');updates[path('public',id,'phase')]=phase;}await update('teacher',updates);}
-export async function setPresentation(id,gId){id=roomId(id);requireTeacher();if(gId!=='')groupId(gId);const updates={[path('public',id,'presentingGroup')]:gId};if(gId)updates[path('public',id,'phase')]='present';await update('teacher',updates);}
-export async function resetGroup(id,gId){id=roomId(id);gId=groupId(gId);requireTeacher();const joinToken=token();await update('teacher',{[path('groups',id,gId,'joinToken')]:joinToken,[path('members',id,gId)]:null});const groups=caches.get('groups:'+id);if(groups?.[gId])groups[gId].joinToken=joinToken;return joinToken;}
-export async function deleteRoom(id){id=roomId(id);requireTeacher();await update('teacher',Object.fromEntries(['public','groups','members','submissions','summaries','meta'].map(part=>[path(part,id),null])));for(const key of caches.keys())if(key.includes(id))caches.delete(key);}
-// Six small assignment/link records; never submission bodies or photos.
-export function watchGroups(id,onData,onError){id=roomId(id);requireTeacher();return watch('teacher',[['groups',path('groups',id)]],v=>v.groups||{},groups=>{caches.set('groups:'+id,clone(groups));onData(groups);},onError);}
+export async function setRoomOpen(id,open){id=roomId(id);requireTeacher();await write('teacher',path('public',id,'open'),!!open);}
+export async function setBoard(id,changes){id=roomId(id);requireTeacher();const allowed=['slide','reveal','presentingGroup','presentTab','presentPage','timerEndsAt','phase'];const updates={};for(const key of allowed)if(Object.hasOwn(changes,key))updates[path('public',id,key)]=changes[key];await update('teacher',updates);}
+export async function setPresentation(id,gId){if(gId!=='')groupId(gId);await setBoard(id,{slide:11,presentingGroup:gId,presentTab:'feature',presentPage:0,phase:'present',reveal:0});}
+export async function resetWriter(id,gId){id=roomId(id);groupId(gId);requireTeacher();await write('teacher',path('writers',id,gId),null);}
+export async function resetStudent(id,number){id=roomId(id);requireTeacher();const profile=await read('teacher',path('members',id,String(number)));if(!profile)return;const changes={[path('members',id,String(number))]:null,[path('registrations',id,profile.uid)]:null};const w=await read('teacher',path('writers',id,profile.groupId));if(w?.uid===profile.uid)changes[path('writers',id,profile.groupId)]=null;await update('teacher',changes);}
+export async function deleteRoom(id){id=roomId(id);requireTeacher();await update('teacher',Object.fromEntries(['public','groups','members','registrations','writers','submissions','summaries','meta'].map(part=>[path(part,id),null])));for(const key of caches.keys())if(key.includes(id))caches.delete(key);}
+
+export async function assignCinema(id,gId,cinemaId){id=roomId(id);groupId(gId);requireTeacher();if(cinemaId!==''&&!CINEMA_IDS.includes(cinemaId))fail('assignment/invalid','영화관을 확인해 주세요.');await write('teacher',path('groups',id,gId,'cinemaId'),cinemaId);}
+
+export async function getRoster(id){id=roomId(id);requireTeacher();const [members,writers]=await Promise.all([read('teacher',path('members',id)),read('teacher',path('writers',id))]);return {members:members||{},writers:writers||{}};}

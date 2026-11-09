@@ -7,6 +7,16 @@ export const GROUP_IDS = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6'];
 export const ROOM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const TEXT_LIMIT = 700;
 export const EVIDENCE_LIMIT = 6;
+export const MAX_STUDENTS = 40;
+export const LESSON_SLIDES = 13;
+export function normalizeProfile(input = {}) {
+  const number = String(input.number || '').trim().replace(/^0+/, '');
+  const name = String(input.name || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 20);
+  if (!GROUP_IDS.includes(input.groupId)) throw new Error('우리 모둠을 골라 주세요.');
+  if (!/^(?:[1-9]|[12][0-9]|3[0-9]|40)$/.test(number)) throw new Error('번호는 1부터 40까지 입력해 주세요.');
+  if (!name) throw new Error('이름을 입력해 주세요.');
+  return {groupId: input.groupId, number, name};
+}
 const text = value => typeof value === 'string' ? value.replace(/\u0000/g, '').slice(0, TEXT_LIMIT) : '';
 const cinemaData = () => globalThis.CINEMA_DATA || globalThis.window?.CINEMA_DATA || [];
 

@@ -1,3 +1,4 @@
+// 부산 영화관 탐험대 · 모둠 수업용 Firebase 설정
 window.CINEMA_FIREBASE_CONFIG = {
   apiKey: "AIzaSyBZilz9G0f65oHPs2GALusUi8yXE0L4hoo",
   authDomain: "busan-cinema-groups.firebaseapp.com",
